@@ -1,0 +1,30 @@
+@import "tailwindcss";
+
+@layer base {
+  :root { color-scheme: dark; }
+
+  html, body, #root { height: 100%; }
+
+  body {
+    @apply m-0 bg-slate-950 text-slate-100;
+  }
+
+  /* Better default forms */
+  input, select, textarea {
+    @apply bg-slate-900 text-slate-100 border border-slate-700 rounded-lg px-3 py-2;
+  }
+  input:focus, select:focus, textarea:focus {
+    @apply outline-none ring-2 ring-indigo-400 border-indigo-400;
+  }
+
+  /* Default buttons */
+  button {
+    @apply rounded-lg bg-slate-800 px-3 py-2 text-sm font-medium hover:bg-slate-700;
+  }
+
+  /* Fix dropdown “white menu / white text” problem in many browsers */
+  select option {
+    background-color: #0f172a; /* slate-900 */
+    color: #e2e8f0;           /* slate-200 */
+  }
+}
