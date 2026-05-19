@@ -7,6 +7,8 @@ import TeamStatus from "../ui/TeamStatus";
 import TeamOrderForm from "../ui/TeamOrderForm";
 import TeamTradeForm from "../ui/TeamTradeForm";
 import TeamTradeInbox from "../ui/TeamTradeInbox";
+import TeamRentalForm from "../ui/TeamRentalForm";
+import TeamRentalInbox from "../ui/TeamRentalInbox";
 import GameStatus from "../ui/GameStatus";
 import { useGame } from "../lib/useGame";
 import InventoryBoard from "../ui/InventoryBoard";
@@ -20,6 +22,7 @@ type StudentMode =
   | "overview"
   | "production"
   | "trade"
+  | "rent"
   | "market"
   | "bank"
   | "auction"
@@ -45,6 +48,11 @@ const modes: {
     id: "trade",
     label: "Trade",
     description: "Send, receive, and track trade requests.",
+  },
+  {
+    id: "rent",
+    label: "Rent / Borrow",
+    description: "Borrow equipment from other teams temporarily.",
   },
   {
     id: "market",
@@ -124,7 +132,7 @@ function getPhaseAdvice(phase: string) {
     return {
       title: "Round is live",
       message:
-        "Focus on production orders and trade requests. Submit before the teacher ends the round.",
+        "Focus on production orders, trade requests, and rental decisions. Submit before the teacher ends the round.",
       recommendedMode: "production" as StudentMode,
       recommendedLabel: "Go to Production",
     };
@@ -134,7 +142,7 @@ function getPhaseAdvice(phase: string) {
     return {
       title: "Interval time",
       message:
-        "Review your result, check your resources, manage loans, and prepare your next strategy.",
+        "Review your result, check resources, manage rentals, manage loans, and prepare your next strategy.",
       recommendedMode: "overview" as StudentMode,
       recommendedLabel: "Go to Overview",
     };
@@ -144,7 +152,7 @@ function getPhaseAdvice(phase: string) {
     return {
       title: "Settlement phase",
       message:
-        "Wait while the teacher processes results. Check your activity and team status.",
+        "Wait while the teacher processes results. Check your activity, rental status, and team status.",
       recommendedMode: "activity" as StudentMode,
       recommendedLabel: "Go to Activity",
     };
@@ -171,11 +179,15 @@ export default function TeamDashboard({
   const [incomingTradeCount, setIncomingTradeCount] = useState(0);
   const [sentTradeUpdateCount, setSentTradeUpdateCount] = useState(0);
 
+  const [incomingRentalCount, setIncomingRentalCount] = useState(0);
+  const [sentRentalUpdateCount, setSentRentalUpdateCount] = useState(0);
+  const [ownerReturnAlertCount, setOwnerReturnAlertCount] = useState(0);
+  const [borrowerReturnAlertCount, setBorrowerReturnAlertCount] = useState(0);
+
   const { game, err } = useGame(gameId);
   const phase = game?.phase ?? "-";
   const roundNumber = game?.roundNumber ?? 0;
 
-  // Avoid TypeScript error if activeAuctionId is not yet included in GameDoc type.
   const activeAuctionId = (game as any)?.activeAuctionId ?? null;
   const hasActiveAuction = Boolean(activeAuctionId);
 
@@ -186,6 +198,11 @@ export default function TeamDashboard({
   }, [phase]);
 
   const totalTradeBadge = incomingTradeCount + sentTradeUpdateCount;
+
+  const returnDueCount = ownerReturnAlertCount + borrowerReturnAlertCount;
+
+  const totalRentalBadge =
+    incomingRentalCount + sentRentalUpdateCount + returnDueCount;
 
   useEffect(() => {
     if (!gameId || !teamId) return;
@@ -248,6 +265,90 @@ export default function TeamDashboard({
     return () => {
       unsubReceived();
       unsubSent();
+    };
+  }, [gameId, teamId, roundNumber]);
+
+  useEffect(() => {
+    if (!gameId || !teamId) return;
+
+    const rentalsRef = collection(db, "games", gameId, "rentals");
+
+    const ownerQuery = query(rentalsRef, where("ownerTeamId", "==", teamId));
+
+    const unsubOwner = onSnapshot(
+      ownerQuery,
+      (snap) => {
+        let waitingOwnerCount = 0;
+        let ownerReturnCount = 0;
+
+        snap.forEach((d) => {
+          const rental = d.data() as any;
+
+          if (
+            rental.status === "WAITING_OWNER" &&
+            Number(rental.roundNumber ?? 0) === roundNumber
+          ) {
+            waitingOwnerCount += 1;
+          }
+
+          if (
+            rental.status === "RETURN_DUE" ||
+            rental.status === "RETURN_REQUESTED"
+          ) {
+            ownerReturnCount += 1;
+          }
+        });
+
+        setIncomingRentalCount(waitingOwnerCount);
+        setOwnerReturnAlertCount(ownerReturnCount);
+      },
+      (error) => {
+        console.error("Owner rental alert error:", error);
+        setIncomingRentalCount(0);
+        setOwnerReturnAlertCount(0);
+      }
+    );
+
+    const borrowerQuery = query(
+      rentalsRef,
+      where("borrowerTeamId", "==", teamId)
+    );
+
+    const unsubBorrower = onSnapshot(
+      borrowerQuery,
+      (snap) => {
+        let updateCount = 0;
+        let borrowerReturnCount = 0;
+
+        snap.forEach((d) => {
+          const rental = d.data() as any;
+
+          if (
+            Number(rental.roundNumber ?? 0) === roundNumber &&
+            rental.status !== "WAITING_OWNER" &&
+            !rental.borrowerSeenAt
+          ) {
+            updateCount += 1;
+          }
+
+          if (rental.status === "RETURN_DUE") {
+            borrowerReturnCount += 1;
+          }
+        });
+
+        setSentRentalUpdateCount(updateCount);
+        setBorrowerReturnAlertCount(borrowerReturnCount);
+      },
+      (error) => {
+        console.error("Borrower rental alert error:", error);
+        setSentRentalUpdateCount(0);
+        setBorrowerReturnAlertCount(0);
+      }
+    );
+
+    return () => {
+      unsubOwner();
+      unsubBorrower();
     };
   }, [gameId, teamId, roundNumber]);
 
@@ -343,6 +444,45 @@ export default function TeamDashboard({
           </div>
         )}
 
+        {/* Rental notification */}
+        {totalRentalBadge > 0 && (
+          <div className="mt-6 rounded-2xl border border-cyan-500/40 bg-cyan-950/40 p-4 text-cyan-100">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="font-semibold">Rental needs your attention</div>
+
+                <div className="mt-1 text-sm text-cyan-100/80">
+                  {incomingRentalCount > 0 && (
+                    <span className="mr-3">
+                      Rental requests to your team: {incomingRentalCount}
+                    </span>
+                  )}
+
+                  {sentRentalUpdateCount > 0 && (
+                    <span className="mr-3">
+                      Rental request updates: {sentRentalUpdateCount}
+                    </span>
+                  )}
+
+                  {returnDueCount > 0 && (
+                    <span className="mr-3">
+                      Return alerts: {returnDueCount}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setActiveMode("rent")}
+                className="rounded-lg bg-cyan-500 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-400"
+              >
+                Review Rentals
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Auction notification */}
         {hasActiveAuction && (
           <div className="mt-6 rounded-2xl border border-purple-500/40 bg-purple-950/40 p-4 text-purple-100">
@@ -408,6 +548,8 @@ export default function TeamDashboard({
               const isActive = activeMode === mode.id;
               const showTradeBadge =
                 mode.id === "trade" && totalTradeBadge > 0;
+              const showRentalBadge =
+                mode.id === "rent" && totalRentalBadge > 0;
               const showAuctionBadge =
                 mode.id === "auction" && hasActiveAuction;
 
@@ -429,6 +571,12 @@ export default function TeamDashboard({
                     {showTradeBadge && (
                       <span className="rounded-full bg-red-500 px-2 py-0.5 text-xs font-bold text-white">
                         {totalTradeBadge}
+                      </span>
+                    )}
+
+                    {showRentalBadge && (
+                      <span className="rounded-full bg-cyan-500 px-2 py-0.5 text-xs font-bold text-slate-950">
+                        {totalRentalBadge}
                       </span>
                     )}
 
@@ -554,6 +702,52 @@ export default function TeamDashboard({
             </Section>
           )}
 
+          {activeMode === "rent" && (
+            <Section
+              title="Rent / Borrow"
+              description={activeModeInfo?.description}
+            >
+              <div className="mb-4 rounded-xl border border-cyan-500/40 bg-cyan-950/40 p-4 text-cyan-100">
+                <h4 className="font-semibold">Rental Rule</h4>
+
+                <p className="mt-2 text-sm leading-6 text-cyan-100/90">
+                  Renting is temporary. Your team can borrow equipment from
+                  another team for a set number of rounds and pay a rental fee
+                  per round. The owner team must accept first, then the teacher
+                  gives final approval.
+                </p>
+
+                <p className="mt-2 text-sm leading-6 text-cyan-100/90">
+                  This system uses one simple direction: <b>the borrowing team
+                  sends the official rental request</b>. If your team wants to
+                  rent out an item, ask the borrowing team to send you a rental
+                  request. Your team can then accept or reject it.
+                </p>
+
+                <p className="mt-2 text-sm leading-6 text-cyan-100/90">
+                  When the rental period ends, the borrowed item must be
+                  returned. Any unpaid rental fee remains as debt until paid.
+                </p>
+              </div>
+
+              <div className="space-y-4">
+                <TeamRentalInbox
+                  gameId={gameId}
+                  teamId={teamId}
+                  roundNumber={roundNumber}
+                />
+
+                <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+                  <TeamRentalForm
+                    gameId={gameId}
+                    teamId={teamId}
+                    roundNumber={roundNumber}
+                  />
+                </div>
+              </div>
+            </Section>
+          )}
+
           {activeMode === "market" && (
             <Section title="Market" description={activeModeInfo?.description}>
               <div className="grid gap-4 lg:grid-cols-2">
@@ -598,6 +792,7 @@ export default function TeamDashboard({
               {hasActiveAuction && (
                 <div className="mb-4 rounded-xl border border-purple-500/40 bg-purple-950/40 p-4 text-purple-100">
                   <h4 className="font-semibold">Auction is live</h4>
+
                   <p className="mt-1 text-sm text-purple-100/80">
                     Check the auction details below and submit your bid before
                     the teacher closes it.

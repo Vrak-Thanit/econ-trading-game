@@ -7,6 +7,7 @@ import TeacherControls from "../ui/TeacherControls";
 import TeacherOrdersBoard from "../ui/TeacherOrderBoard";
 import TeacherAcceptSaleBuckets from "../ui/TeacherAcceptSaleBuckets";
 import TeacherTradesBoard from "../ui/TeacherTradesBoard";
+import TeacherRentalBoard from "../ui/TeacherRentalBoard";
 import GameStatus from "../ui/GameStatus";
 import { useGame } from "../lib/useGame";
 import { useTeams } from "../lib/useTeams";
@@ -20,12 +21,13 @@ type TeacherMode =
   | "orders"
   | "sales"
   | "trades"
+  | "rentals"
   | "auction"
   | "market"
   | "loans"
   | "inventory";
 
-type AlertKey = "orders" | "trades" | "auction" | "loans";
+type AlertKey = "orders" | "trades" | "rentals" | "auction" | "loans";
 
 type ModeAlertCounts = Record<AlertKey, number>;
 
@@ -56,6 +58,12 @@ const modes: {
     label: "Trades",
     description: "Review trade requests between teams.",
     alertKey: "trades",
+  },
+  {
+    id: "rentals",
+    label: "Rentals",
+    description: "Approve rentals and monitor return obligations.",
+    alertKey: "rentals",
   },
   {
     id: "auction",
@@ -111,6 +119,7 @@ export default function TeacherDashboard({ gameId }: { gameId: string }) {
   const [alerts, setAlerts] = useState<ModeAlertCounts>({
     orders: 0,
     trades: 0,
+    rentals: 0,
     auction: 0,
     loans: 0,
   });
@@ -120,10 +129,18 @@ export default function TeacherDashboard({ gameId }: { gameId: string }) {
   const phase = game?.phase ?? "-";
   const { teams } = useTeams(gameId);
 
+  const activeAuctionId = (game as any)?.activeAuctionId ?? null;
+
   const activeModeInfo = modes.find((mode) => mode.id === activeMode);
 
   const totalAlerts = useMemo(() => {
-    return alerts.orders + alerts.trades + alerts.auction + alerts.loans;
+    return (
+      alerts.orders +
+      alerts.trades +
+      alerts.rentals +
+      alerts.auction +
+      alerts.loans
+    );
   }, [alerts]);
 
   // Count current-round unprocessed latest orders
@@ -170,6 +187,11 @@ export default function TeacherDashboard({ gameId }: { gameId: string }) {
       },
       (error) => {
         console.error("Order alert listener error:", error);
+
+        setAlerts((prev) => ({
+          ...prev,
+          orders: 0,
+        }));
       }
     );
   }, [gameId, roundNumber]);
@@ -201,13 +223,67 @@ export default function TeacherDashboard({ gameId }: { gameId: string }) {
       },
       (error) => {
         console.error("Trade alert listener error:", error);
+
+        setAlerts((prev) => ({
+          ...prev,
+          trades: 0,
+        }));
+      }
+    );
+  }, [gameId, roundNumber]);
+
+  // Count rentals needing teacher attention
+  useEffect(() => {
+    if (!gameId) return;
+
+    const rentalsRef = collection(db, "games", gameId, "rentals");
+
+    return onSnapshot(
+      rentalsRef,
+      (snap) => {
+        let count = 0;
+
+        snap.forEach((d) => {
+          const rental = d.data() as any;
+
+          if (rental.status === "WAITING_TEACHER") {
+            count += 1;
+          }
+
+          if (
+            rental.status === "RETURN_DUE" ||
+            rental.status === "RETURN_REQUESTED"
+          ) {
+            count += 1;
+          }
+
+          if (
+            rental.status === "ACTIVE" &&
+            Number(rental.dueRound ?? 999999) <= roundNumber
+          ) {
+            count += 1;
+          }
+        });
+
+        setAlerts((prev) => ({
+          ...prev,
+          rentals: count,
+        }));
+      },
+      (error) => {
+        console.error("Rental alert listener error:", error);
+
+        setAlerts((prev) => ({
+          ...prev,
+          rentals: 0,
+        }));
       }
     );
   }, [gameId, roundNumber]);
 
   // Count active auction bids
   useEffect(() => {
-    if (!gameId || !game?.activeAuctionId) {
+    if (!gameId || !activeAuctionId) {
       setAlerts((prev) => ({
         ...prev,
         auction: 0,
@@ -220,7 +296,7 @@ export default function TeacherDashboard({ gameId }: { gameId: string }) {
       "games",
       gameId,
       "auctions",
-      String(game.activeAuctionId),
+      String(activeAuctionId),
       "bids"
     );
 
@@ -234,9 +310,14 @@ export default function TeacherDashboard({ gameId }: { gameId: string }) {
       },
       (error) => {
         console.error("Auction alert listener error:", error);
+
+        setAlerts((prev) => ({
+          ...prev,
+          auction: 0,
+        }));
       }
     );
-  }, [gameId, game?.activeAuctionId]);
+  }, [gameId, activeAuctionId]);
 
   // Count pending loan requests
   useEffect(() => {
@@ -264,6 +345,11 @@ export default function TeacherDashboard({ gameId }: { gameId: string }) {
       },
       (error) => {
         console.error("Loan alert listener error:", error);
+
+        setAlerts((prev) => ({
+          ...prev,
+          loans: 0,
+        }));
       }
     );
   }, [gameId]);
@@ -334,6 +420,16 @@ export default function TeacherDashboard({ gameId }: { gameId: string }) {
                   className="rounded-full bg-amber-500/20 px-3 py-1 hover:bg-amber-500/30"
                 >
                   Trades: {alerts.trades}
+                </button>
+              )}
+
+              {alerts.rentals > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setActiveMode("rentals")}
+                  className="rounded-full bg-amber-500/20 px-3 py-1 hover:bg-amber-500/30"
+                >
+                  Rentals: {alerts.rentals}
                 </button>
               )}
 
@@ -442,6 +538,15 @@ export default function TeacherDashboard({ gameId }: { gameId: string }) {
           {activeMode === "trades" && (
             <Section title="Trades" description={activeModeInfo?.description}>
               <TeacherTradesBoard gameId={gameId} />
+            </Section>
+          )}
+
+          {activeMode === "rentals" && (
+            <Section title="Rentals" description={activeModeInfo?.description}>
+              <TeacherRentalBoard
+                gameId={gameId}
+                roundNumber={roundNumber}
+              />
             </Section>
           )}
 
