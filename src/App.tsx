@@ -1,15 +1,17 @@
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useParams } from "react-router-dom";
+
 import Login from "./pages/Login";
 import { AuthProvider, useAuth } from "./lib/authContext";
+
 import TeacherDashboard from "./pages/TeacherDashboard";
 import TeamDashboard from "./pages/TeamDashboard";
 
-const GAME_ID = "ECO202-M2.3-2026"; // ✅ fixed single game
-
-function HomeRouter() {
+function GameRouter() {
+  const { gameId } = useParams();
   const { user, profile, loading } = useAuth();
 
   if (loading) return <div style={{ padding: 16 }}>Loading...</div>;
+
   if (!user) return <Navigate to="/login" replace />;
 
   if (!profile) {
@@ -22,11 +24,23 @@ function HomeRouter() {
     );
   }
 
-  if (profile.role === "teacher") {
-    return <TeacherDashboard gameId={GAME_ID} />;
+  if (!gameId) {
+    return <Navigate to="/game/ECO202-M2.3-2026" replace />;
   }
 
-  return <TeamDashboard gameId={GAME_ID} teamId={profile.teamId} />;
+  if (profile.role === "teacher") {
+    return <TeacherDashboard gameId={gameId} />;
+  }
+
+  if (!profile.teamId) {
+    return (
+      <div style={{ padding: 16, color: "crimson" }}>
+        Your user profile has no teamId. Please check your Firestore user document.
+      </div>
+    );
+  }
+
+  return <TeamDashboard gameId={gameId} teamId={profile.teamId} />;
 }
 
 export default function App() {
@@ -34,8 +48,15 @@ export default function App() {
     <AuthProvider>
       <Routes>
         <Route path="/login" element={<Login />} />
-        <Route path="/" element={<HomeRouter />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
+
+        {/* Main game route */}
+        <Route path="/game/:gameId" element={<GameRouter />} />
+
+        {/* Old homepage now redirects to default game */}
+        <Route path="/" element={<Navigate to="/game/ECO202-M2.3-2026" replace />} />
+
+        {/* Any unknown route redirects to default game */}
+        <Route path="*" element={<Navigate to="/game/ECO202-M2.3-2026" replace />} />
       </Routes>
     </AuthProvider>
   );

@@ -1,5 +1,6 @@
 // src/ui/TeacherControls.tsx
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { db } from "../lib/firebase";
 import {
   doc,
@@ -338,6 +339,8 @@ async function cloneGameFromTemplate(newGameId: string) {
 }
 
 export default function TeacherControls({ gameId }: { gameId: string }) {
+  const navigate = useNavigate();
+
   const [game, setGame] = useState<GameDoc | null>(null);
   const [draftDemand, setDraftDemand] = useState<DemandMap>(() => zeroDemand());
 
@@ -1062,8 +1065,14 @@ export default function TeacherControls({ gameId }: { gameId: string }) {
                 if (!ok) return;
 
                 const res = await cloneGameFromTemplate(newGameId);
-                setSaveMsg(`Created ✅ ${res.newGameId} | Teams copied: ${res.teamsCopied}`);
-                alert(`Created ✅ ${res.newGameId}\nTeams copied: ${res.teamsCopied}`);
+
+                  setSaveMsg(`Created ✅ ${res.newGameId} | Teams copied: ${res.teamsCopied}`);
+
+                  alert(
+                    `Created ✅ ${res.newGameId}\nTeams copied: ${res.teamsCopied}\n\nOpening the new game now.`
+                  );
+
+                  navigate(`/game/${encodeURIComponent(res.newGameId)}`);
               } catch (e: any) {
                 setErr(e?.message ?? String(e));
               }

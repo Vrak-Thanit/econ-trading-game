@@ -7,6 +7,7 @@ export type GameDoc = {
   roundNumber?: number;
   currentRound?: any;
   title?: string;
+  activeAuctionId?: string | null;
 };
 
 export function useGame(gameId: string) {

@@ -1,34 +1,73 @@
 // src/ui/TeamAuctionPanel.tsx
+
 import { useEffect, useMemo, useState } from "react";
-import { db } from "../lib/firebase";
 import {
+  collection,
   doc,
   onSnapshot,
-  setDoc,
-  serverTimestamp,
-  collection,
   orderBy,
   query,
+  serverTimestamp,
+  setDoc,
 } from "firebase/firestore";
 
-function clampInt(n: any) {
-  const v = Math.floor(Number(n));
-  return Number.isFinite(v) ? Math.max(0, v) : 0;
-}
+import { db } from "../lib/firebase";
+
+type AuctionResult = {
+  roundNumber: number;
+  auctionId: string;
+  winnerTeamId: string | null;
+  winningBid: number | null;
+  itemKey: string;
+  qty: number;
+  message: string;
+  settledAt?: any;
+};
 
 type GameDoc = {
   activeAuctionId?: string | null;
+  lastAuctionResult?: AuctionResult | null;
 };
 
 type AuctionDoc = {
   status: "OPEN" | "CLOSED" | "SETTLED";
-  lot: { kind: "ITEM"; itemKey: string; qty: number };
-  minBid: number;
-  endsAt: any;
   roundNumber: number;
+  lot: {
+    kind: "ITEM";
+    itemKey: string;
+    qty: number;
+  };
+  minBid: number;
+  endsAt?: any;
+  createdAt?: any;
+  closedAt?: any;
+  winnerTeamId?: string | null;
+  winningBid?: number | null;
 };
 
-type BidDoc = { teamId: string; amount: number; updatedAt?: any };
+type BidDoc = {
+  teamId: string;
+  amount: number;
+  updatedAt?: any;
+};
+
+function clampInt(value: any) {
+  const n = Math.floor(Number(value));
+  return Number.isFinite(n) ? Math.max(0, n) : 0;
+}
+
+function formatTimeLeft(seconds: number | null) {
+  if (seconds == null) return "-";
+
+  if (seconds <= 0) return "Time ended";
+
+  const min = Math.floor(seconds / 60);
+  const sec = seconds % 60;
+
+  if (min <= 0) return `${sec}s`;
+
+  return `${min}m ${sec}s`;
+}
 
 export default function TeamAuctionPanel({
   gameId,
@@ -40,39 +79,77 @@ export default function TeamAuctionPanel({
   const [game, setGame] = useState<GameDoc | null>(null);
   const [auction, setAuction] = useState<AuctionDoc | null>(null);
   const [bids, setBids] = useState<{ id: string; data: BidDoc }[]>([]);
-  const [myBid, setMyBid] = useState<number>(0);
-  const [err, setErr] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
 
-  // ✅ tick to force re-render every second (for live countdown)
+  const [bidAmount, setBidAmount] = useState(0);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
   const [tick, setTick] = useState(0);
+
+  // Force countdown refresh every second
   useEffect(() => {
-    const t = setInterval(() => setTick((x) => x + 1), 1000);
-    return () => clearInterval(t);
+    const timer = setInterval(() => {
+      setTick((x) => x + 1);
+    }, 1000);
+
+    return () => clearInterval(timer);
   }, []);
 
+  // Watch main game document
   useEffect(() => {
+    if (!gameId) return;
+
     setErr(null);
-    const gref = doc(db, "games", gameId);
-    return onSnapshot(
-      gref,
-      (s) => (s.exists() ? setGame(s.data() as any) : null),
-      (e) => setErr(e.message)
+
+    const gameRef = doc(db, "games", gameId);
+
+    const unsub = onSnapshot(
+      gameRef,
+      (snap) => {
+        if (!snap.exists()) {
+          setGame(null);
+          return;
+        }
+
+        setGame(snap.data() as GameDoc);
+      },
+      (error) => {
+        console.error("Team auction game listener error:", error);
+        setErr(error.message);
+      }
     );
+
+    return () => unsub();
   }, [gameId]);
 
+  // Watch active auction and its bids
   useEffect(() => {
     setAuction(null);
     setBids([]);
     setMsg(null);
+    setErr(null);
 
-    if (!game?.activeAuctionId) return;
+    if (!gameId || !game?.activeAuctionId) return;
 
-    const aref = doc(db, "games", gameId, "auctions", String(game.activeAuctionId));
-    const unsubA = onSnapshot(
-      aref,
-      (s) => (s.exists() ? setAuction(s.data() as any) : null),
-      (e) => setErr(e.message)
+    const auctionId = String(game.activeAuctionId);
+
+    const auctionRef = doc(db, "games", gameId, "auctions", auctionId);
+
+    const unsubAuction = onSnapshot(
+      auctionRef,
+      (snap) => {
+        if (!snap.exists()) {
+          setAuction(null);
+          return;
+        }
+
+        setAuction(snap.data() as AuctionDoc);
+      },
+      (error) => {
+        console.error("Team auction listener error:", error);
+        setErr(error.message);
+      }
     );
 
     const bidsRef = collection(
@@ -80,78 +157,129 @@ export default function TeamAuctionPanel({
       "games",
       gameId,
       "auctions",
-      String(game.activeAuctionId),
+      auctionId,
       "bids"
     );
-    const qy = query(bidsRef, orderBy("amount", "desc"));
-    const unsubB = onSnapshot(
-      qy,
-      (snap) => {
-        const rows: any[] = [];
-        snap.forEach((d) => rows.push({ id: d.id, data: d.data() as any }));
-        setBids(rows);
 
-        // keep myBid in sync with my latest stored bid
-        const mine = rows.find((r) => r.id === teamId);
-        setMyBid(clampInt(mine?.data?.amount ?? 0));
+    const bidsQuery = query(bidsRef, orderBy("amount", "desc"));
+
+    const unsubBids = onSnapshot(
+      bidsQuery,
+      (snap) => {
+        const rows: { id: string; data: BidDoc }[] = [];
+
+        snap.forEach((d) => {
+          rows.push({
+            id: d.id,
+            data: d.data() as BidDoc,
+          });
+        });
+
+        setBids(rows);
       },
-      (e) => setErr(e.message)
+      (error) => {
+        console.error("Team auction bids listener error:", error);
+        setErr(error.message);
+      }
     );
 
     return () => {
-      unsubA();
-      unsubB();
+      unsubAuction();
+      unsubBids();
     };
-  }, [gameId, game?.activeAuctionId, teamId]);
+  }, [gameId, game?.activeAuctionId]);
 
-  const highest = useMemo(() => {
-    if (bids.length === 0) return 0;
-    return clampInt(bids[0].data.amount);
-  }, [bids]);
-
-  const iAmLeading = useMemo(() => {
-    return bids.length > 0 && bids[0].id === teamId;
-  }, [bids, teamId]);
-
-  // ✅ secondsLeft recalculates every second using tick
   const secondsLeft = useMemo(() => {
     if (!auction?.endsAt) return null;
+
     const endMs =
       typeof auction.endsAt?.toMillis === "function"
         ? auction.endsAt.toMillis()
         : auction.endsAt?.seconds
         ? auction.endsAt.seconds * 1000
         : null;
+
     if (!endMs) return null;
 
+    // tick forces recalculation
+    tick;
+
     return Math.max(0, Math.floor((endMs - Date.now()) / 1000));
-  }, [auction, tick]);
+  }, [auction?.endsAt, tick]);
+
+  const myBid = useMemo(() => {
+    return bids.find((bid) => bid.id === teamId || bid.data.teamId === teamId);
+  }, [bids, teamId]);
+
+  const highestBid = bids[0] ?? null;
+
+  const highestOtherBid = useMemo(() => {
+    return bids.find((bid) => bid.data.teamId !== teamId) ?? null;
+  }, [bids, teamId]);
+
+  const minimumAllowedBid = useMemo(() => {
+    const minBid = clampInt(auction?.minBid ?? 0);
+    const highestOtherAmount = clampInt(highestOtherBid?.data.amount ?? 0);
+
+    if (highestOtherAmount > 0) {
+      return Math.max(minBid, highestOtherAmount + 1);
+    }
+
+    return minBid;
+  }, [auction?.minBid, highestOtherBid]);
+
+  const isAuctionOpen = auction?.status === "OPEN";
+  const hasTimeEnded = secondsLeft !== null && secondsLeft <= 0;
+
+  const canBid =
+    Boolean(game?.activeAuctionId) &&
+    Boolean(auction) &&
+    isAuctionOpen &&
+    !hasTimeEnded &&
+    bidAmount >= minimumAllowedBid &&
+    !submitting;
+
+  useEffect(() => {
+    if (!auction) return;
+
+    const suggestedBid = minimumAllowedBid || clampInt(auction.minBid);
+
+    setBidAmount((current) => {
+      if (current > 0) return current;
+      return suggestedBid;
+    });
+  }, [auction, minimumAllowedBid]);
 
   async function submitBid() {
-    // clear old messages
     setErr(null);
     setMsg(null);
-
-    // ✅ non-fatal guards (DON'T throw)
-    if (!game?.activeAuctionId) {
-      setMsg("No active auction right now.");
-      return;
-    }
-    if (!auction || auction.status !== "OPEN") {
-      setMsg("Auction is not open.");
-      return;
-    }
-
-    const amt = clampInt(myBid);
-    const min = clampInt(auction.minBid);
-
-    // ✅ validation: show msg but do NOT break UI
-    if (amt < min) {
-      setMsg(`Bid must be ≥ minBid (${min}).`);
-      return;
-    }
+    setSubmitting(true);
 
     try {
+      if (!game?.activeAuctionId) {
+        throw new Error("There is no active auction right now.");
+      }
+
+      if (!auction) {
+        throw new Error("Auction data is not loaded yet.");
+      }
+
+      if (auction.status !== "OPEN") {
+        throw new Error("This auction is not open for bidding.");
+      }
+
+      if (hasTimeEnded) {
+        throw new Error("The auction time has ended.");
+      }
+
+      const cleanBid = clampInt(bidAmount);
+
+      if (cleanBid < minimumAllowedBid) {
+        throw new Error(
+          `Your bid must be at least $${minimumAllowedBid}.`
+        );
+      }
+
       const bidRef = doc(
         db,
         "games",
@@ -164,92 +292,213 @@ export default function TeamAuctionPanel({
 
       await setDoc(
         bidRef,
-        { teamId, amount: amt, updatedAt: serverTimestamp() },
+        {
+          teamId,
+          amount: cleanBid,
+          updatedAt: serverTimestamp(),
+        },
         { merge: true }
       );
 
-      setMsg("Bid submitted ✅");
-    } catch (e: any) {
-      // ✅ only real Firestore errors go here
-      setErr(e?.message ?? String(e));
+      setMsg(`Bid submitted ✅ Your bid: $${cleanBid}`);
+    } catch (error: any) {
+      console.error("Submit auction bid error:", error);
+      setErr(error?.message ?? String(error));
+    } finally {
+      setSubmitting(false);
     }
   }
 
-  // ✅ IMPORTANT: don't return early on err, because that "breaks" the UI
   if (!game?.activeAuctionId) {
     return (
-      <div
-        style={{
-          border: "1px solid #333",
-          borderRadius: 12,
-          padding: 12,
-          maxWidth: 900,
-          opacity: 0.9,
-        }}
-      >
-        <b>Auction:</b> none right now.
-        {err && <div style={{ marginTop: 8, color: "crimson" }}>{err}</div>}
+      <div>
+        <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4 text-slate-300">
+          Auction: none right now.
+        </div>
+
+        {game?.lastAuctionResult && (
+          <div className="mt-4 rounded-xl border border-green-500/40 bg-green-950/40 p-4 text-green-100">
+            <div className="font-semibold">Latest auction result</div>
+            <div className="mt-1 text-sm text-green-100/90">
+              {game.lastAuctionResult.message}
+            </div>
+          </div>
+        )}
+
+        {err && (
+          <div className="mt-4 rounded-xl border border-red-700 bg-red-950/40 p-3 text-red-200">
+            {err}
+          </div>
+        )}
       </div>
     );
   }
 
-  if (!auction) return <div>Loading auction...</div>;
-
   return (
-    <div style={{ border: "1px solid #333", borderRadius: 12, padding: 12, maxWidth: 900 }}>
-      <h3 style={{ marginTop: 0 }}>Auction</h3>
-
-      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
-        <div>
-          <b>Status:</b> {auction.status}
-        </div>
-        <div>
-          <b>Round:</b> {auction.roundNumber}
-        </div>
-        <div>
-          <b>Lot:</b> {auction.lot.itemKey} × {auction.lot.qty}
-        </div>
-        <div>
-          <b>Min bid:</b> {auction.minBid}
-        </div>
-        {secondsLeft != null && (
+    <div>
+      <div className="rounded-xl border border-purple-500/40 bg-purple-950/40 p-4 text-purple-100">
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <b>Time left:</b> {secondsLeft}s
+            <h3 className="text-lg font-semibold">Auction is open</h3>
+
+            <p className="mt-1 text-sm text-purple-100/80">
+              Submit your bid before the teacher closes the auction. The winner
+              is the highest bidder who has enough cash during settlement.
+            </p>
+          </div>
+
+          <span className="rounded-full bg-purple-500 px-3 py-1 text-xs font-bold text-white">
+            LIVE
+          </span>
+        </div>
+      </div>
+
+      {auction && (
+        <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <h4 className="font-semibold text-slate-100">Auction Lot</h4>
+
+          <div className="mt-3 grid gap-3 md:grid-cols-4">
+            <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+              <div className="text-xs uppercase text-slate-500">Item</div>
+              <div className="mt-1 text-lg font-bold text-slate-100">
+                {auction.lot.itemKey}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+              <div className="text-xs uppercase text-slate-500">Quantity</div>
+              <div className="mt-1 text-lg font-bold text-slate-100">
+                {auction.lot.qty}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+              <div className="text-xs uppercase text-slate-500">Minimum Bid</div>
+              <div className="mt-1 text-lg font-bold text-slate-100">
+                ${auction.minBid}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+              <div className="text-xs uppercase text-slate-500">Time Left</div>
+              <div className="mt-1 text-lg font-bold text-slate-100">
+                {formatTimeLeft(secondsLeft)}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-3 text-sm text-slate-400">
+            Status: <b>{auction.status}</b> • Round:{" "}
+            <b>{auction.roundNumber}</b>
+          </div>
+        </div>
+      )}
+
+      <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+        <h4 className="font-semibold text-slate-100">Current Bids</h4>
+
+        {highestBid ? (
+          <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-950/30 p-3 text-amber-100">
+            Highest bid now: <b>{highestBid.data.teamId}</b> with{" "}
+            <b>${clampInt(highestBid.data.amount)}</b>
+          </div>
+        ) : (
+          <div className="mt-3 rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-sm text-slate-400">
+            No bids yet.
+          </div>
+        )}
+
+        {myBid && (
+          <div className="mt-3 rounded-lg border border-blue-500/40 bg-blue-950/30 p-3 text-blue-100">
+            Your current bid: <b>${clampInt(myBid.data.amount)}</b>
+          </div>
+        )}
+
+        {bids.length > 0 && (
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-slate-800 text-slate-400">
+                  <th className="py-2 text-left">Rank</th>
+                  <th className="py-2 text-left">Team</th>
+                  <th className="py-2 text-right">Bid</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {bids.map((bid, index) => (
+                  <tr key={bid.id} className="border-b border-slate-900">
+                    <td className="py-2 text-slate-400">#{index + 1}</td>
+                    <td className="py-2 text-slate-100">
+                      {bid.data.teamId}
+                      {bid.data.teamId === teamId && (
+                        <span className="ml-2 rounded-full bg-blue-500/20 px-2 py-0.5 text-xs text-blue-100">
+                          You
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-2 text-right font-semibold text-slate-100">
+                      ${clampInt(bid.data.amount)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </div>
 
-      <div style={{ marginTop: 10, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-        <div>
-          <b>Highest bid:</b> {highest}
-        </div>
+      <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+        <h4 className="font-semibold text-slate-100">Submit Your Bid</h4>
 
-        <div>
-          <b>Your bid:</b>{" "}
+        <p className="mt-1 text-sm text-slate-400">
+          Minimum allowed bid now: <b>${minimumAllowedBid}</b>
+        </p>
+
+        <div className="mt-3 flex flex-wrap items-center gap-3">
           <input
             type="number"
-            min={0}
-            value={myBid}
-            onChange={(e) => setMyBid(clampInt(e.target.value))}
-            style={{ width: 120, padding: 6 }}
-            disabled={auction.status !== "OPEN"}
+            min={minimumAllowedBid}
+            value={bidAmount}
+            onChange={(event) => setBidAmount(clampInt(event.target.value))}
+            className="w-40 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-right text-slate-100"
           />
+
           <button
-            style={{ marginLeft: 8, padding: "8px 12px" }}
+            type="button"
+            disabled={!canBid}
             onClick={submitBid}
-            disabled={auction.status !== "OPEN"}
+            className="rounded-lg bg-purple-600 px-4 py-2 font-semibold text-white hover:bg-purple-500 disabled:cursor-not-allowed disabled:bg-slate-700"
           >
-            Submit Bid
+            {submitting ? "Submitting..." : "Submit Bid"}
           </button>
         </div>
 
-        <div style={{ color: iAmLeading ? "lightgreen" : "salmon" }}>
-          {iAmLeading ? "You are leading ✅" : "Not leading"}
-        </div>
-      </div>
+        {!isAuctionOpen && (
+          <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-950/40 p-3 text-sm text-amber-100">
+            The auction is no longer open for bidding.
+          </div>
+        )}
 
-      {msg && <div style={{ marginTop: 8, color: "lightgreen" }}>{msg}</div>}
-      {err && <div style={{ marginTop: 8, color: "crimson" }}>{err}</div>}
+        {hasTimeEnded && isAuctionOpen && (
+          <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-950/40 p-3 text-sm text-amber-100">
+            Time has ended. Please wait for the teacher to close and settle the
+            auction.
+          </div>
+        )}
+
+        {msg && (
+          <div className="mt-3 rounded-lg border border-green-700 bg-green-950/40 p-3 text-green-200">
+            {msg}
+          </div>
+        )}
+
+        {err && (
+          <div className="mt-3 rounded-lg border border-red-700 bg-red-950/40 p-3 text-red-200">
+            {err}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
